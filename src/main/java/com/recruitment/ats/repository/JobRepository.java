@@ -1,0 +1,3 @@
+package com.recruitment.ats.repository;
+import com.recruitment.ats.model.Job; import org.springframework.data.jpa.repository.JpaRepository; import java.util.List;
+public interface JobRepository extends JpaRepository<Job,Long>{List<Job> findByStatusIgnoreCase(String status); List<Job> findByTitleContainingIgnoreCaseOrLocationContainingIgnoreCaseOrSkillsContainingIgnoreCase(String title,String location,String skills);}
