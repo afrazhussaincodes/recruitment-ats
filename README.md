@@ -105,3 +105,10 @@ Jenkins pipeline stages:
 Checkout → Build & Test → Package → Archive Artifact → Deploy → Deployment Evidence.
 
 Never commit database passwords or other secrets.
+
+## Git Workflow
+- main: release-ready branch
+- development: integration branch
+- feature/<short-description>: feature development
+- fix/<short-description>: bug fixes
+- hotfix/<short-description>: urgent fixes
