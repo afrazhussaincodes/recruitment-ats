@@ -8,7 +8,7 @@ import com.recruitment.ats.model.*; import com.recruitment.ats.repository.*; imp
  public Application createApplication(ApplicationRequest req){
    Candidate c=candidates.findById(req.getCandidateId()).orElseThrow(()->new RuntimeException("Candidate not found"));
    Job j=jobs.findById(req.getJobId()).orElseThrow(()->new RuntimeException("Job not found"));
-   if(!"OPEN".equalsIgnoreCase(j.getStatus()))throw new IllegalArgumentException("This job is not open");
+   if(!"OPEN".equalsIgnoreCase(j.getStatus()))throw new IllegalArgumentException("This job is not open"); if(req.getCoverLetter()==null || req.getCoverLetter().isBlank())throw new IllegalArgumentException("Cover letter is required");
    if(apps.existsByCandidate_CandidateIdAndJob_JobId(c.getCandidateId(),j.getJobId()))throw new IllegalArgumentException("You have already applied for this job");
    Recruiter r;
    if(req.getRecruiterId()!=null) r=recruiters.findById(req.getRecruiterId()).orElseThrow(()->new RuntimeException("Recruiter not found"));
