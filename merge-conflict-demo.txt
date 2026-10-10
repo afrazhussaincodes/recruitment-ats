@@ -1,2 +1,0 @@
-Project status: Feature A + Feature B
-Resolution: Both changes were reviewed and combined.
