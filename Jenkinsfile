@@ -1,11 +1,18 @@
+
 pipeline {
     agent any
 
     parameters {
-        string(name: 'DEPLOY_DIR', defaultValue: 'C:\\deploy\\recruitment-ats',
-               description: 'Deployment directory')
-        string(name: 'APP_PORT', defaultValue: '8080',
-               description: 'Spring Boot port')
+        string(
+            name: 'DEPLOY_DIR',
+            defaultValue: 'C:\\deploy\\recruitment-ats',
+            description: 'Application deployment directory'
+        )
+        string(
+            name: 'APP_PORT',
+            defaultValue: '8080',
+            description: 'Spring Boot application port'
+        )
     }
 
     environment {
@@ -14,20 +21,29 @@ pipeline {
 
     stages {
         stage('Checkout') {
-            steps { checkout scm }
+            steps {
+                checkout scm
+            }
         }
 
         stage('Build & Test') {
-            steps { bat 'mvnw.cmd clean test' }
+            steps {
+                bat 'mvnw.cmd clean test'
+            }
         }
 
         stage('Package') {
-            steps { bat 'mvnw.cmd package -DskipTests' }
+            steps {
+                bat 'mvnw.cmd package -DskipTests'
+            }
         }
 
         stage('Archive Artifact') {
             steps {
-                archiveArtifacts artifacts: 'target/*.jar', fingerprint: true
+                archiveArtifacts(
+                    artifacts: 'target/*.jar',
+                    fingerprint: true
+                )
             }
         }
 
@@ -36,20 +52,29 @@ pipeline {
                 bat '''
                     if not exist "%DEPLOY_DIR%" mkdir "%DEPLOY_DIR%"
                     copy /Y "%WORKSPACE%\\%ARTIFACT%" "%DEPLOY_DIR%\\recruitment-ats.jar"
+                    if errorlevel 1 exit /b 1
                 '''
             }
         }
 
-        stage('Deployment Evidence') {
+        stage('Start Application & Health Check') {
             steps {
-                echo "Deployed JAR: ${params.DEPLOY_DIR}\\recruitment-ats.jar"
-                echo "Nginx should reverse proxy to the Spring Boot service on port ${params.APP_PORT}."
+                bat '''
+                    powershell.exe -NoProfile -ExecutionPolicy Bypass -File "scripts\\deploy.ps1" -DeployDir "%DEPLOY_DIR%" -AppPort "%APP_PORT%"
+                    if errorlevel 1 exit /b 1
+                '''
             }
         }
     }
 
     post {
-        success { echo 'Recruitment ATS CI/CD pipeline completed successfully.' }
-        failure { echo 'Pipeline failed. Check the stage console output.' }
+        success {
+            echo 'Recruitment ATS deployed and health check passed.'
+            echo "Application URL: http://localhost:${params.APP_PORT}"
+            echo "Health URL: http://localhost:${params.APP_PORT}/actuator/health"
+        }
+        failure {
+            echo 'Pipeline failed. Inspect the failed stage console output.'
+        }
     }
 }
