@@ -16,8 +16,7 @@ pipeline {
     }
 
     environment {
-        ARTIFACT = 'target/recruitment-ats-0.0.1-SNAPSHOT.jar'
-    }
+ARTIFACT = 'target\\recruitment-ats-0.0.1-SNAPSHOT.jar'    }
 
     stages {
         stage('Checkout') {
@@ -47,15 +46,19 @@ pipeline {
             }
         }
 
-        stage('Deploy') {
-            steps {
-                bat '''
-                    if not exist "%DEPLOY_DIR%" mkdir "%DEPLOY_DIR%"
-                    copy /Y "%WORKSPACE%\\%ARTIFACT%" "%DEPLOY_DIR%\\recruitment-ats.jar"
-                    if errorlevel 1 exit /b 1
-                '''
-            }
-        }
+stage('Deploy') {
+    steps {
+        bat '''
+            if not exist "%DEPLOY_DIR%" mkdir "%DEPLOY_DIR%"
+            if not exist "%WORKSPACE%\\target\\recruitment-ats-0.0.1-SNAPSHOT.jar" (
+                echo ERROR: Packaged JAR not found.
+                exit /b 1
+            )
+            copy /Y "%WORKSPACE%\\target\\recruitment-ats-0.0.1-SNAPSHOT.jar" "%DEPLOY_DIR%\\recruitment-ats.jar"
+            if errorlevel 1 exit /b 1
+        '''
+    }
+}
 
         stage('Start Application & Health Check') {
             steps {
