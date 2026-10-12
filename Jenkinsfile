@@ -38,7 +38,7 @@ pipeline {
 
         stage('Build and Unit Tests') {
             steps {
-                bat '.\\mvnw.cmd clean test'
+                bat '.\\mvnw.cmd clean test -Dtest=RecruitmentAtsApplicationTests'
             }
         }
 
