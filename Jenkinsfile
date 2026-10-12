@@ -1,4 +1,3 @@
-
 pipeline {
     agent any
 
@@ -81,7 +80,17 @@ pipeline {
                         $docker = $env:DOCKER
                         $image = "$($env:REGISTRY)/$($env:IMAGE_NAME):$($env:BUILD_NUMBER)"
 
-                        & $docker rm -f recruitment-ats-candidate 2>$null
+                        $containers = @(& $docker container ls -a --format "{{.Names}}")
+                        if ($LASTEXITCODE -ne 0) {
+                            throw "Unable to list Docker containers."
+                        }
+
+                        if ($containers -contains "recruitment-ats-candidate") {
+                            & $docker rm -f recruitment-ats-candidate
+                            if ($LASTEXITCODE -ne 0) {
+                                throw "Could not remove the previous candidate container."
+                            }
+                        }
 
                         & $docker run -d `
                             --name recruitment-ats-candidate `
@@ -166,18 +175,20 @@ pipeline {
                         $image = "$($env:REGISTRY)/$($env:IMAGE_NAME):$($env:BUILD_NUMBER)"
                         $backup = "recruitment-ats-previous"
                         $production = "recruitment-ats"
+                        $candidate = "recruitment-ats-candidate"
 
-                        # Refuse to overwrite an existing rollback container.
-                        & $docker inspect $backup 2>$null | Out-Null
-                        if ($LASTEXITCODE -eq 0) {
+                        # List names once; do not inspect a missing container.
+                        $existingContainers = @(& $docker container ls -a --format "{{.Names}}")
+                        if ($LASTEXITCODE -ne 0) {
+                            throw "Unable to list Docker containers before promotion."
+                        }
+
+                        if ($existingContainers -contains $backup) {
                             throw "Rollback container already exists. Inspect it before promoting."
                         }
 
-                        $hadPrevious = $false
-                        & $docker inspect $production 2>$null | Out-Null
-                        if ($LASTEXITCODE -eq 0) {
-                            $hadPrevious = $true
-                        }
+                        $hadPrevious = $existingContainers -contains $production
+                        $promotionStarted = $false
 
                         try {
                             if ($hadPrevious) {
@@ -192,7 +203,7 @@ pipeline {
                                 }
                             }
 
-                            & $docker rm -f $production 2>$null
+                            $promotionStarted = $true
 
                             & $docker run -d `
                                 --name $production `
@@ -225,42 +236,65 @@ pipeline {
                             }
 
                             if (-not $healthy) {
+                                Write-Host "Production health check failed. Recent logs follow:"
                                 & $docker logs --tail 100 $production
                                 throw "Production health check failed."
                             }
 
                             Write-Host "Production health is UP."
                         } catch {
-                            Write-Error "Promotion failed. Attempting rollback."
+                            $promotionError = $_
+                            Write-Host "Promotion failed: $promotionError"
+                            Write-Host "Attempting rollback."
 
-                            & $docker rm -f $production 2>$null
-
-                            if ($hadPrevious) {
-                                & $docker rename $backup $production
-                                if ($LASTEXITCODE -eq 0) {
-                                    & $docker start $production
-                                    if ($LASTEXITCODE -eq 0) {
-                                        Write-Host "Previous container restarted."
-                                    } else {
-                                        Write-Error "Rollback container could not be restarted."
+                            if ($promotionStarted) {
+                                $currentContainers = @(& $docker container ls -a --format "{{.Names}}")
+                                if ($LASTEXITCODE -eq 0 -and $currentContainers -contains $production) {
+                                    & $docker rm -f $production
+                                    if ($LASTEXITCODE -ne 0) {
+                                        Write-Host "WARNING: Could not remove the failed production container."
                                     }
-                                } else {
-                                    Write-Error "Could not restore the previous container name."
                                 }
                             }
 
-                            throw
+                            if ($hadPrevious) {
+                                $currentContainers = @(& $docker container ls -a --format "{{.Names}}")
+                                if ($LASTEXITCODE -eq 0 -and $currentContainers -contains $backup) {
+                                    & $docker rename $backup $production
+                                    if ($LASTEXITCODE -eq 0) {
+                                        & $docker start $production
+                                        if ($LASTEXITCODE -eq 0) {
+                                            Write-Host "Previous production container restored and restarted."
+                                        } else {
+                                            Write-Host "WARNING: Previous container was restored but could not be restarted."
+                                        }
+                                    } else {
+                                        Write-Host "WARNING: Could not restore the previous container name."
+                                    }
+                                } else {
+                                    Write-Host "WARNING: Rollback container was not found."
+                                }
+                            }
+
+                            throw "Production promotion failed. See messages above."
                         }
 
-                        # Remove backup only after production passes its health check.
+                        # Delete the backup only after the new production container is healthy.
                         if ($hadPrevious) {
                             & $docker rm -f $backup
                             if ($LASTEXITCODE -ne 0) {
-                                Write-Warning "Production is healthy, but the old backup could not be removed."
+                                Write-Host "WARNING: Production is healthy, but the old backup could not be removed."
                             }
                         }
 
-                        & $docker rm -f recruitment-ats-candidate 2>$null
+                        $currentContainers = @(& $docker container ls -a --format "{{.Names}}")
+                        if ($LASTEXITCODE -eq 0 -and $currentContainers -contains $candidate) {
+                            & $docker rm -f $candidate
+                            if ($LASTEXITCODE -ne 0) {
+                                Write-Host "WARNING: Could not remove the candidate container."
+                            }
+                        }
+
                         Write-Host "Version $($env:BUILD_NUMBER) promoted successfully."
                     '''
                 }
