@@ -11,8 +11,11 @@ pipeline {
         DOCKER = 'C:\\Users\\admin\\AppData\\Local\\Programs\\DockerDesktop\\resources\\bin\\docker.exe'
         REGISTRY = 'localhost:5000'
         IMAGE_NAME = 'recruitment-ats'
-        APP_URL = 'http://localhost:8080'
-        HEALTH_URL = 'http://localhost:8080/actuator/health'
+        APP_URL = 'http://localhost:8082'
+        HEALTH_URL = 'http://localhost:8082/actuator/health'
+        PROD_URL = 'http://localhost:8080'
+        PROD_HEALTH_URL = 'http://localhost:8080/actuator/health'
+        DB_URL = 'jdbc:mysql://host.docker.internal:3306/recruitment_ats?useSSL=false&serverTimezone=UTC&allowPublicKeyRetrieval=true'
     }
 
     stages {
@@ -48,7 +51,9 @@ pipeline {
         stage('Build Versioned Docker Image') {
             steps {
                 bat '''
-                    "%DOCKER%" build -t "%REGISTRY%/%IMAGE_NAME%:%BUILD_NUMBER%" -t "%REGISTRY%/%IMAGE_NAME%:latest" .
+                    "%DOCKER%" build ^
+                      -t "%REGISTRY%/%IMAGE_NAME%:%BUILD_NUMBER%" ^
+                      -t "%REGISTRY%/%IMAGE_NAME%:latest" .
                 '''
             }
         }
@@ -62,31 +67,43 @@ pipeline {
             }
         }
 
-        stage('Deploy Container') {
+        stage('Deploy Candidate') {
             steps {
-                powershell '''
-                    $ErrorActionPreference = "Stop"
-                    $docker = $env:DOCKER
-                    $image = "$($env:REGISTRY)/$($env:IMAGE_NAME):$($env:BUILD_NUMBER)"
+                withCredentials([
+                    usernamePassword(
+                        credentialsId: 'ats-mysql-credentials',
+                        usernameVariable: 'ATS_DB_USERNAME',
+                        passwordVariable: 'ATS_DB_PASSWORD'
+                    )
+                ]) {
+                    powershell '''
+                        $ErrorActionPreference = "Stop"
+                        $docker = $env:DOCKER
+                        $image = "$($env:REGISTRY)/$($env:IMAGE_NAME):$($env:BUILD_NUMBER)"
 
-                    # Keep the old container until the image has been built and pushed.
-                    & $docker stop recruitment-ats 2>$null
-                    & $docker rm recruitment-ats 2>$null
+                        & $docker rm -f recruitment-ats-candidate 2>$null
 
-                    & $docker run -d `
-                        --name recruitment-ats `
-                        --restart unless-stopped `
-                        -p 8080:8080 `
-                        $image
+                        & $docker run -d `
+                            --name recruitment-ats-candidate `
+                            --restart unless-stopped `
+                            --add-host host.docker.internal:host-gateway `
+                            -p 8082:8080 `
+                            -e "SPRING_DATASOURCE_URL=$env:DB_URL" `
+                            -e "SPRING_DATASOURCE_USERNAME=$env:ATS_DB_USERNAME" `
+                            -e "SPRING_DATASOURCE_PASSWORD=$env:ATS_DB_PASSWORD" `
+                            $image
 
-                    if ($LASTEXITCODE -ne 0) {
-                        throw "Failed to start the newly built container."
-                    }
-                '''
+                        if ($LASTEXITCODE -ne 0) {
+                            throw "Candidate container failed to start."
+                        }
+
+                        Write-Host "Candidate deployed on port 8082."
+                    '''
+                }
             }
         }
 
-        stage('Check Application Health') {
+        stage('Check Candidate Health') {
             steps {
                 powershell '''
                     $ErrorActionPreference = "Stop"
@@ -108,18 +125,20 @@ pipeline {
                     }
 
                     if (-not $healthy) {
-                        & $env:DOCKER logs --tail 100 recruitment-ats
-                        throw "Application health check failed."
+                        & $env:DOCKER logs --tail 100 recruitment-ats-candidate
+                        throw "Candidate health check failed."
                     }
 
-                    Write-Host "Application health is UP."
+                    Write-Host "Candidate health is UP."
                 '''
             }
         }
 
         stage('Continuous UI Testing') {
             steps {
-                bat '.\\mvnw.cmd -Dtest=SeleniumUITests test'
+                bat '''
+                    .\\mvnw.cmd -Dtest=SeleniumUITests "-Dapp.url=%APP_URL%" test
+                '''
             }
         }
 
@@ -128,8 +147,123 @@ pipeline {
                 bat '''
                     "%DOCKER%" pull "%REGISTRY%/%IMAGE_NAME%:%BUILD_NUMBER%"
                     "%DOCKER%" images "%REGISTRY%/%IMAGE_NAME%"
-                    "%DOCKER%" ps
                 '''
+            }
+        }
+
+        stage('Promote Candidate to Production') {
+            steps {
+                withCredentials([
+                    usernamePassword(
+                        credentialsId: 'ats-mysql-credentials',
+                        usernameVariable: 'ATS_DB_USERNAME',
+                        passwordVariable: 'ATS_DB_PASSWORD'
+                    )
+                ]) {
+                    powershell '''
+                        $ErrorActionPreference = "Stop"
+                        $docker = $env:DOCKER
+                        $image = "$($env:REGISTRY)/$($env:IMAGE_NAME):$($env:BUILD_NUMBER)"
+                        $backup = "recruitment-ats-previous"
+                        $production = "recruitment-ats"
+
+                        # Refuse to overwrite an existing rollback container.
+                        & $docker inspect $backup 2>$null | Out-Null
+                        if ($LASTEXITCODE -eq 0) {
+                            throw "Rollback container already exists. Inspect it before promoting."
+                        }
+
+                        $hadPrevious = $false
+                        & $docker inspect $production 2>$null | Out-Null
+                        if ($LASTEXITCODE -eq 0) {
+                            $hadPrevious = $true
+                        }
+
+                        try {
+                            if ($hadPrevious) {
+                                & $docker stop $production
+                                if ($LASTEXITCODE -ne 0) {
+                                    throw "Could not stop the previous production container."
+                                }
+
+                                & $docker rename $production $backup
+                                if ($LASTEXITCODE -ne 0) {
+                                    throw "Could not preserve the previous production container."
+                                }
+                            }
+
+                            & $docker rm -f $production 2>$null
+
+                            & $docker run -d `
+                                --name $production `
+                                --restart unless-stopped `
+                                --add-host host.docker.internal:host-gateway `
+                                -p 8080:8080 `
+                                -e "SPRING_DATASOURCE_URL=$env:DB_URL" `
+                                -e "SPRING_DATASOURCE_USERNAME=$env:ATS_DB_USERNAME" `
+                                -e "SPRING_DATASOURCE_PASSWORD=$env:ATS_DB_PASSWORD" `
+                                $image
+
+                            if ($LASTEXITCODE -ne 0) {
+                                throw "Production container failed to start."
+                            }
+
+                            $healthy = $false
+                            for ($i = 1; $i -le 30; $i++) {
+                                try {
+                                    $response = Invoke-RestMethod `
+                                        -Uri $env:PROD_HEALTH_URL `
+                                        -TimeoutSec 5
+
+                                    if ($response.status -eq "UP") {
+                                        $healthy = $true
+                                        break
+                                    }
+                                } catch {
+                                    Start-Sleep -Seconds 5
+                                }
+                            }
+
+                            if (-not $healthy) {
+                                & $docker logs --tail 100 $production
+                                throw "Production health check failed."
+                            }
+
+                            Write-Host "Production health is UP."
+                        } catch {
+                            Write-Error "Promotion failed. Attempting rollback."
+
+                            & $docker rm -f $production 2>$null
+
+                            if ($hadPrevious) {
+                                & $docker rename $backup $production
+                                if ($LASTEXITCODE -eq 0) {
+                                    & $docker start $production
+                                    if ($LASTEXITCODE -eq 0) {
+                                        Write-Host "Previous container restarted."
+                                    } else {
+                                        Write-Error "Rollback container could not be restarted."
+                                    }
+                                } else {
+                                    Write-Error "Could not restore the previous container name."
+                                }
+                            }
+
+                            throw
+                        }
+
+                        # Remove backup only after production passes its health check.
+                        if ($hadPrevious) {
+                            & $docker rm -f $backup
+                            if ($LASTEXITCODE -ne 0) {
+                                Write-Warning "Production is healthy, but the old backup could not be removed."
+                            }
+                        }
+
+                        & $docker rm -f recruitment-ats-candidate 2>$null
+                        Write-Host "Version $($env:BUILD_NUMBER) promoted successfully."
+                    '''
+                }
             }
         }
     }
@@ -153,7 +287,7 @@ pipeline {
         }
 
         failure {
-            echo 'Pipeline failed. Check Console Output and container logs.'
+            echo 'Pipeline failed. Review Console Output and Docker container logs.'
         }
 
         cleanup {
