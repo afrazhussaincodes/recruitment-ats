@@ -8,15 +8,14 @@ pipeline {
     }
 
     environment {
-        APP_NAME = 'Recruitment-ATS'
-        DEPLOY_DIR = 'C:\\deploy\\recruitment-ats'
-        DEPLOY_JAR = 'C:\\deploy\\recruitment-ats\\recruitment-ats.jar'
+        DOCKER = 'C:\\Users\\admin\\AppData\\Local\\Programs\\DockerDesktop\\resources\\bin\\docker.exe'
+        REGISTRY = 'localhost:5000'
+        IMAGE_NAME = 'recruitment-ats'
         APP_URL = 'http://localhost:8080'
         HEALTH_URL = 'http://localhost:8080/actuator/health'
     }
 
     stages {
-
         stage('Checkout') {
             steps {
                 checkout scm
@@ -24,11 +23,12 @@ pipeline {
             }
         }
 
-        stage('Verify Java and Maven') {
+        stage('Verify Java, Maven and Docker') {
             steps {
                 bat '''
                     java -version
                     .\\mvnw.cmd -version
+                    "%DOCKER%" version
                 '''
             }
         }
@@ -45,37 +45,43 @@ pipeline {
             }
         }
 
-        stage('Archive Application JAR') {
+        stage('Build Versioned Docker Image') {
             steps {
-                archiveArtifacts(
-                    artifacts: 'target/recruitment-ats-0.0.1-SNAPSHOT.jar',
-                    fingerprint: true
-                )
+                bat '''
+                    "%DOCKER%" build -t "%REGISTRY%/%IMAGE_NAME%:%BUILD_NUMBER%" -t "%REGISTRY%/%IMAGE_NAME%:latest" .
+                '''
             }
         }
 
-        stage('Deploy Application JAR') {
+        stage('Push Image to Local Registry') {
+            steps {
+                bat '''
+                    "%DOCKER%" push "%REGISTRY%/%IMAGE_NAME%:%BUILD_NUMBER%"
+                    "%DOCKER%" push "%REGISTRY%/%IMAGE_NAME%:latest"
+                '''
+            }
+        }
+
+        stage('Deploy Container') {
             steps {
                 powershell '''
                     $ErrorActionPreference = "Stop"
+                    $docker = $env:DOCKER
+                    $image = "$($env:REGISTRY)/$($env:IMAGE_NAME):$($env:BUILD_NUMBER)"
 
-                    $sourceJar = Join-Path $env:WORKSPACE `
-                        "target\\recruitment-ats-0.0.1-SNAPSHOT.jar"
+                    # Keep the old container until the image has been built and pushed.
+                    & $docker stop recruitment-ats 2>$null
+                    & $docker rm recruitment-ats 2>$null
 
-                    $deployDir = $env:DEPLOY_DIR
-                    $destinationJar = $env:DEPLOY_JAR
+                    & $docker run -d `
+                        --name recruitment-ats `
+                        --restart unless-stopped `
+                        -p 8080:8080 `
+                        $image
 
-                    if (-not (Test-Path $sourceJar)) {
-                        throw "Build JAR not found: $sourceJar"
+                    if ($LASTEXITCODE -ne 0) {
+                        throw "Failed to start the newly built container."
                     }
-
-                    New-Item -ItemType Directory `
-                        -Force -Path $deployDir | Out-Null
-
-                    Copy-Item -Path $sourceJar `
-                        -Destination $destinationJar -Force
-
-                    Write-Host "JAR deployed to $destinationJar"
                 '''
             }
         }
@@ -84,45 +90,45 @@ pipeline {
             steps {
                 powershell '''
                     $ErrorActionPreference = "Stop"
-                    $healthUrl = $env:HEALTH_URL
+                    $healthy = $false
 
-                    try {
-                        $response = Invoke-RestMethod `
-                            -Uri $healthUrl -TimeoutSec 10
+                    for ($i = 1; $i -le 30; $i++) {
+                        try {
+                            $response = Invoke-RestMethod `
+                                -Uri $env:HEALTH_URL `
+                                -TimeoutSec 5
 
-                        if ($response.status -ne "UP") {
-                            throw "Application health is not UP."
+                            if ($response.status -eq "UP") {
+                                $healthy = $true
+                                break
+                            }
+                        } catch {
+                            Start-Sleep -Seconds 5
                         }
+                    }
 
-                        Write-Host "Application health check passed."
+                    if (-not $healthy) {
+                        & $env:DOCKER logs --tail 100 recruitment-ats
+                        throw "Application health check failed."
                     }
-                    catch {
-                        Write-Host "Health endpoint is not responding."
-                        Write-Host "The deployment stage copies the JAR but does not start it."
-                        throw
-                    }
+
+                    Write-Host "Application health is UP."
                 '''
             }
         }
 
         stage('Continuous UI Testing') {
             steps {
-                powershell '''
-                    $ErrorActionPreference = "Stop"
+                bat '.\\mvnw.cmd -Dtest=SeleniumUITests test'
+            }
+        }
 
-                    $healthUrl = $env:HEALTH_URL
-                    $health = Invoke-RestMethod `
-                        -Uri $healthUrl -TimeoutSec 10
-
-                    if ($health.status -ne "UP") {
-                        throw "Application must be UP before Selenium tests."
-                    }
-
-                    .\\mvnw.cmd -Dtest=SeleniumUITests test
-
-                    if ($LASTEXITCODE -ne 0) {
-                        throw "Selenium UI tests failed."
-                    }
+        stage('Verify Published Image') {
+            steps {
+                bat '''
+                    "%DOCKER%" pull "%REGISTRY%/%IMAGE_NAME%:%BUILD_NUMBER%"
+                    "%DOCKER%" images "%REGISTRY%/%IMAGE_NAME%"
+                    "%DOCKER%" ps
                 '''
             }
         }
@@ -143,11 +149,11 @@ pipeline {
         }
 
         success {
-            echo 'Recruitment ATS pipeline completed successfully.'
+            echo 'Week 12 Docker continuous deployment completed successfully.'
         }
 
         failure {
-            echo 'Pipeline failed. Review Console Output and test reports.'
+            echo 'Pipeline failed. Check Console Output and container logs.'
         }
 
         cleanup {
