@@ -1,0 +1,58 @@
+---
+- name: Week 14 - Provisioning and Reliability Validation
+  hosts: ats_local
+  gather_facts: false
+
+  tasks:
+    - name: Verify Docker CLI and server
+      ansible.builtin.command: docker version
+      changed_when: false
+
+    - name: Provision isolated ATS candidate
+      ansible.builtin.command:
+        argv:
+          - bash
+          - scripts/ansible/provision-week14.sh
+      args:
+        chdir: "{{ playbook_dir }}/.."
+      register: provision_result
+      changed_when: >
+        'CANDIDATE_CREATED' in provision_result.stdout or
+        'CANDIDATE_STARTED' in provision_result.stdout
+
+    - name: Wait for candidate health
+      ansible.builtin.command:
+        argv:
+          - docker
+          - exec
+          - recruitment-ats-week14
+          - sh
+          - -c
+          - wget -qO- http://127.0.0.1:8080/actuator/health
+      register: candidate_health
+      changed_when: false
+      retries: 12
+      delay: 5
+      until: >
+        candidate_health.rc == 0 and
+        '"status":"UP"' in candidate_health.stdout
+
+    - name: Display candidate health
+      ansible.builtin.debug:
+        msg: "{{ candidate_health.stdout }}"
+
+    - name: Verify production container remains running
+      ansible.builtin.command:
+        argv:
+          - docker
+          - inspect
+          - --format
+          - "{{ '{{' }}.State.Running{{ '}}' }}"
+          - recruitment-ats
+      register: production_state
+      changed_when: false
+      failed_when: production_state.stdout != "true"
+
+    - name: Display production protection result
+      ansible.builtin.debug:
+        msg: "Existing production container remains running."
