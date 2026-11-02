@@ -1,0 +1,47 @@
+---
+- name: Week 13 - Recruitment ATS Configuration Management
+  hosts: ats_local
+  gather_facts: false
+
+  tasks:
+    - name: Verify Docker CLI and server
+      ansible.builtin.command: docker version
+      changed_when: false
+
+    - name: Check ATS health inside its container
+      ansible.builtin.command:
+        argv:
+          - docker
+          - exec
+          - recruitment-ats
+          - sh
+          - -c
+          - wget -qO- http://127.0.0.1:8080/actuator/health
+      register: ats_health
+      changed_when: false
+      failed_when: >
+        ats_health.rc != 0 or
+        '"status":"UP"' not in ats_health.stdout
+
+    - name: Display ATS health
+      ansible.builtin.debug:
+        msg: "{{ ats_health.stdout }}"
+
+    - name: Check registry inside its container
+      ansible.builtin.command:
+        argv:
+          - docker
+          - exec
+          - recruitment-ats-registry
+          - sh
+          - -c
+          - wget -qO- http://127.0.0.1:5000/v2/_catalog
+      register: registry_check
+      changed_when: false
+      failed_when: >
+        registry_check.rc != 0 or
+        '"recruitment-ats"' not in registry_check.stdout
+
+    - name: Display registry result
+      ansible.builtin.debug:
+        msg: "{{ registry_check.stdout }}"
